@@ -4,11 +4,18 @@
 
 **Actors:** Trader, Risk Manager, System Admin, Market Data Feed (external), Matching Engine (internal), System (automated behavior with no human actor).
 
+> **Note:** System Admin's responsibility per source §2 ("xử lý sự cố, can thiệp thủ công khi lệnh bị treo bất thường" — incident handling / manual intervention on abnormally stuck orders) has no corresponding use case in source §3, so no epic/story below covers it. Flagged here rather than silently dropped — see Open Questions.
+
 ---
 
 ## Epic 1 — Place New Order
 
 *Source: §3.1, §4*
+
+**Cross-cutting constraints (apply regardless of order type, per §5):**
+
+- **Given** an order is for a fractional quantity, **when** I attempt to set any TIF other than `DAY`, **then** the system rejects it — fractional orders only accept `DAY`.
+- **Given** an order is for a crypto asset, **when** I attempt to set any TIF other than `GTC` or `IOC`, **then** the system rejects it — crypto orders only accept `GTC` or `IOC`.
 
 ### 1.1 Market Order
 
@@ -22,7 +29,7 @@ As a Trader, I want to place a market order, so that my order fills immediately 
 - **Given** I submit a market order, **when** I attempt to set TIF to `OPG` or `CLS`, **then** the system accepts it only during the corresponding auction session; if unmatched in that session, the order is canceled.
 - **Given** I submit a market order with TIF `IOC`, **when** the order is placed, **then** the system fills whatever quantity it can immediately and cancels the remainder.
 - **Given** I submit a market order with TIF `FOK`, **when** the full quantity cannot be filled immediately, **then** the system cancels the entire order (no partial fill).
-- **Given** it is after 4:00pm ET, **when** I submit a market order, **then** the system queues it for the next trading session instead of rejecting it (Edge case §8.7).
+- **Given** it is after 4:00pm ET, **when** I submit a market order, **then** the system queues it for the next regular trading session instead of rejecting it — market orders are never extended-hours eligible (see §1.2 extended-hours rule), so "queued" here always means held until the next regular-session open, not routed into extended hours (Edge case §8.7).
 
 ### 1.2 Limit Order
 
@@ -39,6 +46,7 @@ As a Trader, I want to place a limit order at a specified price, so that I contr
 - **Given** I submit a limit order with a price < $1.00, **when** the price has more than 4 decimal digits, **then** the system rejects the order at input time (Edge case §8.10).
 - **Given** a symbol has not yet begun trading (pre-IPO), **when** I attempt to submit any order type other than limit, **then** the system rejects it — only limit orders are accepted (Edge case §8.8).
 - **Given** I want my order to be eligible during extended hours, **when** I submit it, **then** the system requires order type = limit **and** TIF = `DAY` or `GTC`; any other combination is rejected for extended-hours eligibility (Edge case §8.9).
+- **Given** it is after 4:00pm ET, **when** I submit a limit order that meets extended-hours eligibility (limit + `DAY`/`GTC`), **then** the system attempts to work it in extended hours immediately; **given** it does not meet that eligibility, **when** submitted after 4:00pm ET, **then** it is queued for the next regular session like a market order (Edge case §8.7, clarifies interaction with Edge case §8.9).
 
 ### 1.3 Stop Order
 
@@ -73,6 +81,7 @@ As a Trader, I want to place a bracket order (entry + take-profit + stop-loss), 
 
 **Acceptance Criteria:**
 
+- **Given** I configure a bracket order, **when** I set the exit legs, **then** the take-profit leg must be a limit order and the stop-loss leg must be a stop or stop-limit order (§4.5).
 - **Given** I submit a bracket order, **when** the entry leg has not fully filled, **then** the take-profit and stop-loss legs remain inactive.
 - **Given** the entry leg fills completely, **when** the fill is confirmed, **then** the system activates both the take-profit and stop-loss legs.
 - **Given** both exit legs are active, **when** either the take-profit or the stop-loss fills, **then** the system automatically cancels the other exit leg.
@@ -128,7 +137,7 @@ As a Trader, I want to modify an order that hasn't filled yet, so that I can adj
 - **Given** an order is in a non-terminal, non-pending state (e.g. `new`), **when** I submit a modify request, **then** the system transitions it to `pending_replace`.
 - **Given** a modify request succeeds, **when** the replacement is applied, **then** the order transitions from `pending_replace` to `replaced`.
 - **Given** an order is already in `pending_replace`, **when** I submit a second modify request before the first resolves, **then** the system rejects the second request to prevent conflicting concurrent updates (Edge case §8.3).
-- **Given** an order is in a terminal state (`filled`, `canceled`, `expired`), **when** I attempt to modify it, **then** the system rejects the request — terminal states never transition further (§7).
+- **Given** an order is in a terminal state (`filled`, `canceled`, `expired`, `rejected`), **when** I attempt to modify it, **then** the system rejects the request — terminal states never transition further (§7).
 
 ---
 
@@ -146,7 +155,7 @@ As a Trader, I want to cancel an order that hasn't filled yet, so that I can wit
 - **Given** an order is currently in `pending_replace`, **when** I submit a cancel request, **then** the system **rejects** it — cancel is not permitted while a replace is in flight (Edge case §8.3, invalid transition per §7).
 - **Given** a buy order is canceled before it fills, **when** the cancellation is confirmed, **then** the system releases the locked buying power immediately (§6.2).
 - **Given** a sell-long or buy-to-cover order is canceled before it fills, **when** the cancellation is confirmed, **then** no buying-power release is needed since those only affect buying power upon execution, not placement (§6.2).
-- **Given** an order is in a terminal state (`filled`, `canceled`, `expired`), **when** I attempt to cancel it, **then** the system rejects the request (§7).
+- **Given** an order is in a terminal state (`filled`, `canceled`, `expired`, `rejected`), **when** I attempt to cancel it, **then** the system rejects the request (§7).
 
 ---
 
@@ -160,9 +169,11 @@ As a Trader, I want to view the current status of my order, so that I know wheth
 
 **Acceptance Criteria:**
 
-- **Given** I request an order's status, **when** the system responds, **then** the status is one of: `new`, `partially_filled`, `filled`, `done_for_day`, `canceled`, `expired`, `replaced`, `pending_cancel`, `pending_replace`.
-- **Given** an order's status is `filled`, `canceled`, or `expired`, **when** I check it later, **then** its status never changes further — these are terminal states (§7).
+- **Given** I request an order's status, **when** the system responds, **then** the status is one of: `new`, `partially_filled`, `filled`, `done_for_day`, `canceled`, `expired`, `replaced`, `pending_cancel`, `pending_replace`, `rejected`.
+- **Given** an order's status is `filled`, `canceled`, `expired`, or `rejected`, **when** I check it later, **then** its status never changes further — these are terminal states (§7).
 - **Given** an order is `partially_filled`, **when** I view it, **then** the system shows both the filled quantity and the remaining open quantity.
+
+> **⚠️ Source inconsistency resolved:** §7's state list omits `rejected`, but its transition examples include `new → rejected (vi phạm business rule)`. This doc adds `rejected` as a terminal state and interprets it as: **input-time validation failures** (sub-penny pricing, invalid TIF/order-type combination, fractional/crypto TIF violations, etc.) happen synchronously before an order record exists — no state transition, the request is simply refused. **Post-creation business-rule rejections** (e.g. Risk Manager blocking an order, a buying-power check failing after the order reached `new`) transition the order `new → rejected`. This interpretation needs stakeholder confirmation (see Open Questions).
 
 ---
 
@@ -233,6 +244,7 @@ As a Risk Manager, I want to block or intervene on orders that exceed exposure l
 **Acceptance Criteria:**
 
 - **Given** an order would exceed a defined exposure limit, **when** it is submitted, **then** the Risk Manager has the ability to block it before it reaches the Matching Engine.
+- **Given** the Risk Manager blocks an order, **when** the block is applied, **then** the order transitions `new → rejected` (see Epic 4.1 state-machine clarification).
 
 > **⚠️ Needs clarification:** The domain source (§9, Open Questions) does not specify how Risk Manager override actually works — what limits are checked, at what stage (pre-trade vs. post-trade), or what the intervention UX/API looks like. No further AC can be written until this is confirmed with a stakeholder; do not treat the single AC above as complete.
 
@@ -290,6 +302,8 @@ As the System, I want to apply a conservative buffer and continuous recalculatio
 - **Given** the market price for a shorted symbol rises, **when** the system recalculates, **then** the locked buying-power requirement increases accordingly, which can trigger a margin call (Edge case §8.5).
 - **Given** a short position incurs a real trading loss, **when** that loss is realized, **then** it can exceed the amount that was originally locked at order placement — the initial lock is not a loss cap (Edge case §8.6).
 
+> **⚠️ Needs clarification:** The formula `MAX(limit_price, 1.03 × current_ask) × quantity` (§6.5) assumes a `limit_price` exists. The source doesn't specify the calculation for a short-sell order with no limit price (e.g. a short-sell **market** order) — confirm with a stakeholder whether `current_ask` alone (with the 3% buffer) is used in that case.
+
 ---
 
 ## Open Questions
@@ -301,5 +315,8 @@ As the System, I want to apply a conservative buffer and continuous recalculatio
 3. Asset scope: equities only, or crypto/options from day one?
 4. How exactly does Risk Manager override work (see Epic 7 clarification note)?
 5. What specific compliance/regulatory requirements must be satisfied?
+6. Is the `rejected` state interpretation in Epic 4.1 correct (input-validation failures never create an order record; post-creation business-rule violations transition `new → rejected`)?
+7. Is System Admin's stuck-order intervention responsibility (§2) in scope for this module, and if so, what's the use case/flow? Currently unrepresented in any epic.
+8. For short-sell orders with no limit price (e.g. a market short-sell), does the buying-power formula in Epic 8.4 use `current_ask` alone with the 3% buffer?
 
 **Assumption:** All business rules in the source domain document are based on the Alpaca Markets API reference and require confirmation with actual stakeholders before being treated as final.
